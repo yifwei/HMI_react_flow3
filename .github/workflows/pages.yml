@@ -29,10 +29,17 @@ jobs:
         run: npm ci
       - name: Build
         run: npm run build
+      - name: Package Pages artifact
+        run: |
+          tar --dereference --hard-dereference --directory dist -cvf artifact.tar .
+          gzip -f artifact.tar
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
-          path: ./dist
+          name: github-pages
+          path: ./artifact.tar.gz
+          if-no-files-found: error
+          retention-days: 1
 
   deploy:
     environment:
