@@ -1,20 +1,29 @@
 import {
+  addEdge,
   Background,
   Controls,
   MarkerType,
   ReactFlow,
   ReactFlowProvider,
   Handle,
+  useEdgesState,
+  useNodesState,
   getBezierPath,
   getSmoothStepPath,
   Position,
 } from '@xyflow/react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
+  Download,
   Gauge,
+  MousePointer2,
   Play,
   Power,
   RadioTower,
+  Save,
+  Trash2,
+  Upload,
   RotateCw,
   SlidersHorizontal,
   Zap,
@@ -100,16 +109,143 @@ const flowEdges = [
 ];
 
 const defaultViewport = { x: 30, y: 16, zoom: 0.82 };
+const storageKey = 'hmi-react-flow3-layout-v1';
+
+function loadSavedLayout() {
+  try {
+    const saved = window.localStorage.getItem(storageKey);
+    return saved ? JSON.parse(saved) : null;
+  } catch {
+    return null;
+  }
+}
 
 function App() {
+  const [savedLayout] = useState(() => (typeof window === 'undefined' ? null : loadSavedLayout()));
+  const [nodes, setNodes, onNodesChange] = useNodesState(savedLayout?.nodes ?? flowNodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(savedLayout?.edges ?? flowEdges);
+  const [editMode, setEditMode] = useState(false);
+  const [selectedNodes, setSelectedNodes] = useState([]);
+  const [selectedEdges, setSelectedEdges] = useState([]);
+  const [saveState, setSaveState] = useState(savedLayout ? 'Loaded saved layout' : 'Default layout');
+  const flowRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    if (flowRef.current && savedLayout?.viewport) {
+      flowRef.current.setViewport(savedLayout.viewport, { duration: 0 });
+    }
+  }, [savedLayout?.viewport]);
+
+  const onConnect = useCallback((connection) => {
+    const id = `pipe-${connection.source}-${connection.target}-${Date.now()}`;
+    setEdges((currentEdges) => addEdge({
+      ...connection,
+      id,
+      type: 'metallicPipe',
+      animated: true,
+      data: { active: true, route: 'step' },
+    }, currentEdges));
+    setSaveState('Unsaved changes');
+  }, [setEdges]);
+
+  const onSelectionChange = useCallback(({ nodes: nextNodes, edges: nextEdges }) => {
+    setSelectedNodes(nextNodes);
+    setSelectedEdges(nextEdges);
+  }, []);
+
+  const saveLayout = useCallback(() => {
+    const payload = {
+      nodes,
+      edges,
+      viewport: flowRef.current?.getViewport() ?? defaultViewport,
+      savedAt: new Date().toISOString(),
+    };
+    window.localStorage.setItem(storageKey, JSON.stringify(payload));
+    setSaveState('Saved to this browser');
+  }, [edges, nodes]);
+
+  const resetLayout = useCallback(() => {
+    window.localStorage.removeItem(storageKey);
+    setNodes(flowNodes);
+    setEdges(flowEdges);
+    flowRef.current?.setViewport(defaultViewport, { duration: 250 });
+    setSaveState('Reset to default');
+  }, [setEdges, setNodes]);
+
+  const deleteSelection = useCallback(() => {
+    const nodeIds = new Set(selectedNodes.map((node) => node.id));
+    const edgeIds = new Set(selectedEdges.map((edge) => edge.id));
+    setNodes((currentNodes) => currentNodes.filter((node) => !nodeIds.has(node.id)));
+    setEdges((currentEdges) => currentEdges.filter((edge) => (
+      !edgeIds.has(edge.id) && !nodeIds.has(edge.source) && !nodeIds.has(edge.target)
+    )));
+    setSaveState('Unsaved changes');
+  }, [selectedEdges, selectedNodes, setEdges, setNodes]);
+
+  const exportLayout = useCallback(() => {
+    const payload = JSON.stringify({
+      nodes,
+      edges,
+      viewport: flowRef.current?.getViewport() ?? defaultViewport,
+      exportedAt: new Date().toISOString(),
+    }, null, 2);
+    const blob = new Blob([payload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'hmi-react-flow-layout.json';
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [edges, nodes]);
+
+  const importLayout = useCallback((event) => {
+    const [file] = event.target.files;
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const layout = JSON.parse(reader.result);
+        if (!Array.isArray(layout.nodes) || !Array.isArray(layout.edges)) {
+          throw new Error('Invalid layout file');
+        }
+        setNodes(layout.nodes);
+        setEdges(layout.edges);
+        if (layout.viewport) {
+          flowRef.current?.setViewport(layout.viewport, { duration: 250 });
+        }
+        setSaveState('Imported layout');
+      } catch {
+        setSaveState('Import failed');
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+  }, [setEdges, setNodes]);
+
+  const selectionCount = selectedNodes.length + selectedEdges.length;
+
   return (
     <ReactFlowProvider>
-      <main className="app-shell">
-        <TopBar />
+      <main className={`app-shell ${editMode ? 'is-editing' : ''}`}>
+        <TopBar
+          editMode={editMode}
+          saveState={saveState}
+          selectionCount={selectionCount}
+          onDeleteSelection={deleteSelection}
+          onExportLayout={exportLayout}
+          onImportClick={() => fileInputRef.current?.click()}
+          onResetLayout={resetLayout}
+          onSaveLayout={saveLayout}
+          onToggleEdit={() => setEditMode((current) => !current)}
+        />
+        <input ref={fileInputRef} className="file-input" type="file" accept="application/json" onChange={importLayout} />
+        <SvgDefinitions />
         <section className="flow-panel" aria-label="PLC HMI process overview">
           <ReactFlow
-            nodes={flowNodes}
-            edges={flowEdges}
+            nodes={nodes}
+            edges={edges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             defaultViewport={defaultViewport}
@@ -117,30 +253,29 @@ function App() {
             maxZoom={1.35}
             fitView
             fitViewOptions={{ padding: 0.1 }}
-            nodesDraggable={false}
-            nodesConnectable={false}
-            elementsSelectable={false}
+            onInit={(instance) => {
+              flowRef.current = instance;
+            }}
+            onConnect={onConnect}
+            onEdgesChange={(changes) => {
+              onEdgesChange(changes);
+              setSaveState('Unsaved changes');
+            }}
+            onNodesChange={(changes) => {
+              onNodesChange(changes);
+              setSaveState('Unsaved changes');
+            }}
+            onSelectionChange={onSelectionChange}
+            nodesDraggable={editMode}
+            nodesConnectable={editMode}
+            elementsSelectable={editMode}
+            deleteKeyCode={editMode ? ['Backspace', 'Delete'] : null}
+            snapToGrid={editMode}
+            snapGrid={[12, 12]}
             proOptions={{ hideAttribution: true }}
           >
             <Background color="#7d8388" gap={24} size={1} />
             <Controls showInteractive={false} position="bottom-left" />
-            <defs>
-              <linearGradient id="metalPipe" x1="0%" y1="0%" x2="0%" y2="100%">
-                <stop offset="0%" stopColor="#f7fbff" />
-                <stop offset="22%" stopColor="#aeb8bd" />
-                <stop offset="50%" stopColor="#626b70" />
-                <stop offset="73%" stopColor="#d7e0e5" />
-                <stop offset="100%" stopColor="#777f84" />
-              </linearGradient>
-              <linearGradient id="livePipe" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor="#14ef72" />
-                <stop offset="42%" stopColor="#8eff9d" />
-                <stop offset="100%" stopColor="#10b981" />
-              </linearGradient>
-              <filter id="pipeShadow" x="-20%" y="-20%" width="140%" height="140%">
-                <feDropShadow dx="0" dy="3" stdDeviation="2" floodColor="#101316" floodOpacity="0.4" />
-              </filter>
-            </defs>
           </ReactFlow>
         </section>
       </main>
@@ -148,7 +283,41 @@ function App() {
   );
 }
 
-function TopBar() {
+function SvgDefinitions() {
+  return (
+    <svg className="svg-defs" aria-hidden="true" focusable="false">
+      <defs>
+        <linearGradient id="metalPipe" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#f7fbff" />
+          <stop offset="22%" stopColor="#aeb8bd" />
+          <stop offset="50%" stopColor="#626b70" />
+          <stop offset="73%" stopColor="#d7e0e5" />
+          <stop offset="100%" stopColor="#777f84" />
+        </linearGradient>
+        <linearGradient id="livePipe" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor="#14ef72" />
+          <stop offset="42%" stopColor="#8eff9d" />
+          <stop offset="100%" stopColor="#10b981" />
+        </linearGradient>
+        <filter id="pipeShadow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="3" stdDeviation="2" floodColor="#101316" floodOpacity="0.4" />
+        </filter>
+      </defs>
+    </svg>
+  );
+}
+
+function TopBar({
+  editMode,
+  onDeleteSelection,
+  onExportLayout,
+  onImportClick,
+  onResetLayout,
+  onSaveLayout,
+  onToggleEdit,
+  saveState,
+  selectionCount,
+}) {
   return (
     <header className="topbar">
       <div>
@@ -156,11 +325,21 @@ function TopBar() {
         <h1>Mixing Line Process HMI</h1>
       </div>
       <div className="toolbar" aria-label="Line controls">
+        <button className={editMode ? 'is-active' : ''} title="Toggle edit mode" onClick={onToggleEdit}>
+          <MousePointer2 size={18} /> {editMode ? 'EDITING' : 'EDIT'}
+        </button>
+        <button title="Save layout in this browser" onClick={onSaveLayout}><Save size={18} /> SAVE</button>
+        <button title="Download layout JSON" onClick={onExportLayout}><Download size={18} /> EXPORT</button>
+        <button title="Import layout JSON" onClick={onImportClick}><Upload size={18} /> IMPORT</button>
+        <button title="Delete selected nodes or edges" disabled={!editMode || selectionCount === 0} onClick={onDeleteSelection}>
+          <Trash2 size={18} /> DELETE
+        </button>
+        <button title="Reset layout" onClick={onResetLayout}><RotateCw size={18} /> RESET LAYOUT</button>
         <button title="Run"><Play size={18} /> RUN</button>
-        <button title="Reset"><RotateCw size={18} /> RESET</button>
         <button className="danger" title="Power"><Power size={18} /> E-STOP</button>
       </div>
       <div className="system-stats">
+        <span>{saveState}</span>
         <span><RadioTower size={16} /> PLC online</span>
         <span><Zap size={16} /> 480 V</span>
         <span><Gauge size={16} /> 86% OEE</span>
@@ -230,7 +409,7 @@ function MixerNode({ data }) {
       <div className="mixer-status">
         <strong>{data.label}</strong>
         <span>{data.state}</span>
-        <small>{data.rpm} RPM · {data.temp}</small>
+        <small>{data.rpm} RPM - {data.temp}</small>
       </div>
     </article>
   );
@@ -245,7 +424,7 @@ function FeederNode({ data }) {
       </div>
       <div className="feeder-readout">
         <strong>{data.label}</strong>
-        <span>{data.speed} · {data.load}</span>
+        <span>{data.speed} - {data.load}</span>
       </div>
     </article>
   );
